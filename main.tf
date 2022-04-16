@@ -3,8 +3,8 @@ provider "aws" {
 }
 
 locals {
-  name   = "complete-mysql"
-  region = "eu-west-1"
+  name   = "mysql-db"
+  region = "us-east-1"
   tags = {
     Owner       = "user"
     Environment = "dev"
@@ -15,21 +15,19 @@ locals {
 # Supporting Resources
 ################################################################################
 
-module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 3.0"
+data "aws_vpc" "main" {
+  default = true
+}
 
-  name = local.name
-  cidr = "10.99.0.0/18"
+data "aws_availability_zones" "available" {
+}
 
-  azs              = ["${local.region}a", "${local.region}b", "${local.region}c"]
-  public_subnets   = ["10.99.0.0/24", "10.99.1.0/24", "10.99.2.0/24"]
-  private_subnets  = ["10.99.3.0/24", "10.99.4.0/24", "10.99.5.0/24"]
-  database_subnets = ["10.99.7.0/24", "10.99.8.0/24", "10.99.9.0/24"]
-
-  create_database_subnet_group = true
-
-  tags = local.tags
+data "aws_subnets" "all" {
+  
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.main.id]
+  }
 }
 
 module "security_group" {
@@ -38,7 +36,7 @@ module "security_group" {
 
   name        = local.name
   description = "Complete MySQL example security group"
-  vpc_id      = module.vpc.vpc_id
+  vpc_id      = data.aws_vpc.main.id
 
   # ingress
   ingress_with_cidr_blocks = [
@@ -47,7 +45,7 @@ module "security_group" {
       to_port     = 3306
       protocol    = "tcp"
       description = "MySQL access from within VPC"
-      cidr_blocks = module.vpc.vpc_cidr_block
+      cidr_blocks = "0.0.0.0/0" # data.aws_vpc.main.cidr_block
     },
   ]
 
@@ -59,7 +57,7 @@ module "security_group" {
 ################################################################################
 
 module "db" {
-  source = "../../"
+  source = "terraform-aws-modules/rds/aws"
 
   identifier = local.name
 
@@ -68,17 +66,19 @@ module "db" {
   engine_version       = "8.0.27"
   family               = "mysql8.0" # DB parameter group
   major_engine_version = "8.0"      # DB option group
-  instance_class       = "db.t4g.large"
+  instance_class       = var.db_instance_class
+  publicly_accessible  = true // change to false for production workloads
 
   allocated_storage     = 20
-  max_allocated_storage = 100
+  max_allocated_storage = 21
 
-  db_name  = "completeMysql"
-  username = "complete_mysql"
-  port     = 3306
+  db_name  = var.db_name
+  username = var.db_username
+  password = var.db_password  // use secrets manager or parameter store with randomly generated password for production workloads !!!
+  port     = var.db_port
 
-  multi_az               = true
-  subnet_ids             = module.vpc.database_subnets
+  multi_az               = false
+  subnet_ids             = data.aws_subnets.all.ids // switch to dedicated database subnets for production workloads !!!
   vpc_security_group_ids = [module.security_group.security_group_id]
 
   maintenance_window              = "Mon:00:00-Mon:03:00"
@@ -89,11 +89,12 @@ module "db" {
   backup_retention_period = 0
   skip_final_snapshot     = true
   deletion_protection     = false
+  storage_encrypted       = false // encryption is not supported by db.t2.micro instance class
 
-  performance_insights_enabled          = true
-  performance_insights_retention_period = 7
-  create_monitoring_role                = true
-  monitoring_interval                   = 60
+  performance_insights_enabled          = false // not supported for current configuration. set to true for production workload
+  performance_insights_retention_period = 0     // set to 7 or greater than 0 for production workload
+  create_monitoring_role                = false // not required for demo. set to true for production workload
+  monitoring_interval                   = 0     // set to 60 or greater than 0 for productino workload.
 
   parameters = [
     {
@@ -121,44 +122,35 @@ module "db" {
   }
 }
 
-module "db_default" {
-  source = "../../"
+# module "db_default" {
+#   source = "terraform-aws-modules/rds/aws"
 
-  identifier = "${local.name}-default"
+#   identifier = "${local.name}-default"
 
-  create_db_option_group    = false
-  create_db_parameter_group = false
+#   create_db_option_group    = false
+#   create_db_parameter_group = false
 
-  # All available versions: http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_MySQL.html#MySQL.Concepts.VersionMgmt
-  engine               = "mysql"
-  engine_version       = "8.0.27"
-  family               = "mysql8.0" # DB parameter group
-  major_engine_version = "8.0"      # DB option group
-  instance_class       = "db.t4g.large"
+#   # All available versions: http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_MySQL.html#MySQL.Concepts.VersionMgmt
+#   engine               = "mysql"
+#   engine_version       = "8.0.27"
+#   family               = "mysql8.0" # DB parameter group
+#   major_engine_version = "8.0"      # DB option group
+#   instance_class       = "db.t2.micro"
 
-  allocated_storage = 20
+#   allocated_storage = 20
 
-  db_name  = "completeMysql"
-  username = "complete_mysql"
-  port     = 3306
+#   db_name  = "mysql_db"
+#   username = "user1"
+#   password = "password"  // use secrets manager or parameter store with randomly generated password for production workloads !!!
+#   port     = 3306
 
-  subnet_ids             = module.vpc.database_subnets
-  vpc_security_group_ids = [module.security_group.security_group_id]
+#   subnet_ids             = module.vpc.database_subnets
+#   vpc_security_group_ids = [module.security_group.security_group_id]
 
-  maintenance_window = "Mon:00:00-Mon:03:00"
-  backup_window      = "03:00-06:00"
+#   maintenance_window = "Mon:00:00-Mon:03:00"
+#   backup_window      = "03:00-06:00"
 
-  backup_retention_period = 0
+#   backup_retention_period = 0
 
-  tags = local.tags
-}
-
-module "db_disabled" {
-  source = "../../"
-
-  identifier = "${local.name}-disabled"
-
-  create_db_instance        = false
-  create_db_parameter_group = false
-  create_db_option_group    = false
-}
+#   tags = local.tags
+# }
